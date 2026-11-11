@@ -1,0 +1,60 @@
+# Section 6 flow: every PR is built and tested automatically on the dedicated
+# self-hosted runner (label "angel"). No worker and no approval involved.
+name: PR Build (self-hosted)
+
+on:
+  pull_request:
+    branches: [main, 'sprint/**']
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: pr-build-${{ github.event.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    # The runner PC may block scripts by policy; bypass it for this process only.
+    shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
+
+jobs:
+  runner-build:
+    # Public repo: never run a fork's code on the self-hosted runner.
+    if: >-
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, windows, x64, angel]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # Installs the SDK into the runner's own tool folder when the PC has none on PATH.
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+        env:
+          DOTNET_INSTALL_DIR: ${{ runner.tool_cache }}/dotnet
+
+      - name: Build and test
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          $areas = @([regex]::Matches("$env:PR_BODY", '(?m)^\s*[-*]\s*\[[xX]\]\s*([A-Za-z0-9_.]+)\s*\r?$') | ForEach-Object { $_.Groups[1].Value })
+          "Runner $env:RUNNER_NAME on $env:COMPUTERNAME, areas: $(if ($areas) { $areas -join ', ' } else { 'all' })"
+          if ($areas.Count -gt 0) { ./ci.ps1 -Areas ($areas -join ',') } else { ./ci.ps1 }
+          exit $LASTEXITCODE
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trx-${{ github.run_id }}
+          path: TestResults/*.trx
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Prune the work folder
+        if: always()
+        run: git clean -xdfq

@@ -25,8 +25,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Installs the SDK into the runner's own tool folder when the PC has none on PATH.
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+        env:
+          DOTNET_INSTALL_DIR: ${{ runner.tool_cache }}/dotnet
+
       - name: Runner facts
-        shell: powershell
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
         run: |
           "Runner : $env:RUNNER_NAME ($env:RUNNER_OS / $env:RUNNER_ARCH)"
           "Machine: $env:COMPUTERNAME"
@@ -34,7 +41,7 @@ jobs:
           dotnet --list-sdks
 
       - name: Build and test (same script the worker calls)
-        shell: powershell
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
         run: ./ci.ps1
 
       - name: Upload test results
@@ -47,5 +54,5 @@ jobs:
 
       - name: Prune the work folder
         if: always()
-        shell: powershell
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
         run: git clean -xdf
