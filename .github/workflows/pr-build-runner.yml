@@ -30,6 +30,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Installs the SDK into the runner's own tool folder when the PC has none on PATH.
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+        env:
+          DOTNET_INSTALL_DIR: ${{ runner.tool_cache }}/dotnet
+
       - name: Build and test
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
