@@ -1,6 +1,7 @@
-# Section 6 flow: every PR is built and tested automatically on the dedicated
-# self-hosted runner (label "angel"). No worker and no approval involved.
-name: PR Build (self-hosted)
+# Target PR Validation (Figure 4 of the CI/CD map): ONE job on the self-hosted runner.
+#   checkout (once) -> build (changed areas only) -> test (all xTest, always)
+#   -> DB apply (SQL Server on the runner) -> result (the one check name a ruleset requires)
+name: PR Validation (self-hosted)
 
 on:
   pull_request:
@@ -20,7 +21,7 @@ defaults:
     shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
 
 jobs:
-  runner-build:
+  pr-validation-result:
     # Public repo: never run a fork's code on the self-hosted runner.
     if: >-
       github.event.pull_request.draft == false &&
@@ -28,7 +29,10 @@ jobs:
     runs-on: [self-hosted, windows, x64, angel]
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - name: checkout (once per run)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2   # the PR merge commit and its base, enough to see what changed
 
       # Installs the SDK into the runner's own tool folder when the PC has none on PATH.
       - uses: actions/setup-dotnet@v4
@@ -37,17 +41,46 @@ jobs:
         env:
           DOTNET_INSTALL_DIR: ${{ runner.tool_cache }}/dotnet
 
-      - name: Build and test
-        env:
-          PR_BODY: ${{ github.event.pull_request.body }}
+      - name: build (changed areas only)
+        id: build
         run: |
-          $areas = @([regex]::Matches("$env:PR_BODY", '(?m)^\s*[-*]\s*\[[xX]\]\s*([A-Za-z0-9_.]+)\s*\r?$') | ForEach-Object { $_.Groups[1].Value })
-          "Runner $env:RUNNER_NAME on $env:COMPUTERNAME, areas: $(if ($areas) { $areas -join ', ' } else { 'all' })"
-          if ($areas.Count -gt 0) { ./ci.ps1 -Areas ($areas -join ',') } else { ./ci.ps1 }
+          ./ci.ps1 -Stage build -BaseRef 'HEAD^1'
           exit $LASTEXITCODE
 
+      - name: test (all xTest, always)
+        id: test
+        run: |
+          ./ci.ps1 -Stage test
+          exit $LASTEXITCODE
+
+      - name: DB apply (throwaway database on the runner's SQL Server)
+        id: db
+        if: ${{ !cancelled() }}
+        run: |
+          ./ci.ps1 -Stage db -DbApply
+          exit $LASTEXITCODE
+
+      - name: result
+        if: ${{ always() }}
+        env:
+          BUILD: ${{ steps.build.outcome }}
+          TEST: ${{ steps.test.outcome }}
+          DB: ${{ steps.db.outcome }}
+        run: |
+          $rows = @(
+            "### PR Validation on $env:RUNNER_NAME ($env:COMPUTERNAME)", '',
+            '| Step | Outcome |', '|---|---|',
+            "| build (changed areas only) | $env:BUILD |",
+            "| test (all xTest) | $env:TEST |",
+            "| DB apply | $env:DB |"
+          )
+          $rows | Add-Content -Path $env:GITHUB_STEP_SUMMARY -Encoding utf8
+          $bad = @($env:BUILD, $env:TEST, $env:DB) | Where-Object { $_ -ne 'success' }
+          if ($bad) { Write-Host "::error::PR Validation failed (build=$env:BUILD test=$env:TEST db=$env:DB)"; exit 1 }
+          Write-Host 'PR Validation passed'
+
       - name: Upload test results
-        if: always()
+        if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
           name: trx-${{ github.run_id }}
@@ -56,5 +89,5 @@ jobs:
           if-no-files-found: ignore
 
       - name: Prune the work folder
-        if: always()
+        if: ${{ always() }}
         run: git clean -xdfq
