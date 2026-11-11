@@ -99,22 +99,79 @@ function Invoke-Db {
     }
     if (-not $DbApply) { return }
 
+    # Where to apply, in order of preference:
+    #   1. -SqlServer / CI_SQL_SERVER   an instance you name (Windows authentication)
+    #   2. a throwaway SQL Server 2022 container, when Docker is running on this machine
+    #   3. a private LocalDB instance, then .\SQLEXPRESS, then localhost
     $servers = @()
+    $container = $null
     if ($SqlServer) { $servers += $SqlServer }
     else {
-        if (Get-Command sqllocaldb -ErrorAction SilentlyContinue) {
-            # A private LocalDB instance for CI, so nothing on the default instance is touched.
-            sqllocaldb create ci-sandbox 2>&1 | Out-Null
-            sqllocaldb start ci-sandbox 2>&1 | Out-Null
-            $global:LASTEXITCODE = 0
-            $servers += @('(localdb)\ci-sandbox', '(localdb)\MSSQLLocalDB')
+        $container = Start-SqlContainer
+        if ($container) { $servers += $container.Server }
+        else {
+            $ErrorActionPreference = 'Continue'
+            if (Get-Command sqllocaldb -ErrorAction SilentlyContinue) {
+                # A private LocalDB instance for CI, so nothing on the default instance is touched.
+                sqllocaldb create ci-sandbox 2>&1 | Out-Null
+                sqllocaldb start ci-sandbox 2>&1 | Out-Null
+                $servers += @('(localdb)\ci-sandbox', '(localdb)\MSSQLLocalDB')
+            }
+            $ErrorActionPreference = 'Stop'
+            $servers += @('.\SQLEXPRESS', 'localhost')
         }
-        $servers += @('.\SQLEXPRESS', 'localhost')
     }
+
     # Applies the scripts, in order, to a throwaway database and drops it afterwards.
-    Invoke-Step 'db-apply' {
+    Write-Host '::group::db-apply'
+    try {
+        if ($container) {
+            $env:CI_SQL_USER = 'sa'; $env:CI_SQL_PASSWORD = $container.Password; $env:CI_SQL_WAIT_SECONDS = '120'
+        }
         dotnet run --project tools/DbApply -c $Configuration -- (Join-Path $PSScriptRoot 'Database') @servers
+        $code = $LASTEXITCODE
     }
+    finally {
+        $env:CI_SQL_USER = $null; $env:CI_SQL_PASSWORD = $null; $env:CI_SQL_WAIT_SECONDS = $null
+        if ($container) {
+            $ErrorActionPreference = 'Continue'
+            docker rm -f $container.Name 2>&1 | Out-Null
+            $ErrorActionPreference = 'Stop'
+            Write-Host "ci.ps1: removed container $($container.Name)"
+        }
+    }
+    Write-Host '::endgroup::'
+    if ($code -ne 0) {
+        Write-Host "ci.ps1: step 'db-apply' failed with exit code $code"
+        exit $code
+    }
+}
+
+# Starts a throwaway SQL Server 2022 container. Returns $null when Docker is not usable here.
+function Start-SqlContainer {
+    $ErrorActionPreference = 'Continue'
+    if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+        Write-Host 'ci.ps1: docker is not installed on this machine, falling back to a local SQL Server'
+        return $null
+    }
+    docker info 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host 'ci.ps1: docker is installed but its engine is not reachable from this account, falling back'
+        return $null
+    }
+    $name = "ci-sql-$PID"
+    # Random per-run password; the container lives for one run and listens on loopback only.
+    $password = 'Ci1!' + [guid]::NewGuid().ToString('N').Substring(0, 24)
+    $image = 'mcr.microsoft.com/mssql/server:2022-latest'
+    docker run -d --rm --name $name -e 'ACCEPT_EULA=Y' -e "MSSQL_SA_PASSWORD=$password" -e 'MSSQL_PID=Developer' `
+        -p '127.0.0.1::1433' $image 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "ci.ps1: could not start $image, falling back to a local SQL Server"
+        return $null
+    }
+    $port = ("$(docker port $name 1433/tcp)" -split ':')[-1].Trim()
+    Write-Host "ci.ps1: started container $name ($image) on 127.0.0.1,$port"
+    return @{ Name = $name; Server = "127.0.0.1,$port"; Password = $password }
 }
 
 function Invoke-Tests {

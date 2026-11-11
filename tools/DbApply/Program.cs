@@ -18,20 +18,33 @@ if (args.Length < 2 || !Directory.Exists(args[0]))
 
 var root = Path.GetFullPath(args[0]);
 
-static string ConnectionString(string server, string database) => new SqlConnectionStringBuilder
+// CI_SQL_PASSWORD set = SQL authentication (the throwaway container); otherwise Windows authentication.
+var sqlPassword = Environment.GetEnvironmentVariable("CI_SQL_PASSWORD");
+var sqlUser = Environment.GetEnvironmentVariable("CI_SQL_USER") ?? "sa";
+// A container needs a while before it accepts logins: keep retrying this long.
+_ = int.TryParse(Environment.GetEnvironmentVariable("CI_SQL_WAIT_SECONDS"), out var waitSeconds);
+
+string ConnectionString(string server, string database)
 {
-    DataSource = server,
-    InitialCatalog = database,
-    IntegratedSecurity = true,
-    TrustServerCertificate = true,
-    Encrypt = false,
-    ConnectTimeout = 8,
-    Pooling = false,
-}.ConnectionString;
+    var b = new SqlConnectionStringBuilder
+    {
+        DataSource = server,
+        InitialCatalog = database,
+        TrustServerCertificate = true,
+        Encrypt = false,
+        ConnectTimeout = 8,
+        Pooling = false,
+    };
+    if (string.IsNullOrEmpty(sqlPassword)) { b.IntegratedSecurity = true; }
+    else { b.UserID = sqlUser; b.Password = sqlPassword; }
+    return b.ConnectionString;
+}
 
 string? server = null;
 foreach (var candidate in args.Skip(1).Where(a => !string.IsNullOrWhiteSpace(a)))
 {
+    var deadline = DateTime.UtcNow.AddSeconds(waitSeconds);
+    retry:
     try
     {
         using var probe = new SqlConnection(ConnectionString(candidate, "master"));
@@ -49,6 +62,11 @@ foreach (var candidate in args.Skip(1).Where(a => !string.IsNullOrWhiteSpace(a))
     }
     catch (Exception e)
     {
+        if (DateTime.UtcNow < deadline)
+        {
+            Thread.Sleep(3000);
+            goto retry;
+        }
         Console.WriteLine($"db apply: {candidate} not usable - {e.Message.Split('\n')[0].Trim()}");
     }
 }
