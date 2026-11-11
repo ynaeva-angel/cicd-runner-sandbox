@@ -135,6 +135,8 @@ function Invoke-Build([string] $Src, [string[]] $Areas, [string] $OutDir, [long]
     $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $Src 'ci.ps1'),
                  '-ResultsDir', (Join-Path $OutDir 'trx'))
     if ($Areas.Count -gt 0) { $argList += @('-Areas', ($Areas -join ',')) }
+    # Start-Process joins the list with spaces and does not quote: paths with spaces need it.
+    $argList = @($argList | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } })
 
     $proc = Start-Process -FilePath $psExe -ArgumentList $argList -WorkingDirectory $Src -PassThru -WindowStyle Hidden `
         -RedirectStandardOutput (Join-Path $OutDir 'build.log') -RedirectStandardError (Join-Path $OutDir 'build.err.log')
