@@ -1,0 +1,75 @@
+# Section 7 hand-off flow.
+#   hand-off : ~30 s on a shared (here: GitHub-hosted) runner. Posts a pending status and exits.
+#   report   : waits on Environment "local-ci" and holds NO runner while it waits.
+#              worker/local-ci-worker.ps1 builds on the local machine, then approves (green)
+#              or rejects (red) this job through the pending_deployments API.
+name: PR Validation
+
+on:
+  pull_request:
+    branches: [main, 'sprint/**']
+    types: [opened, synchronize, ready_for_review]
+
+# A new push cancels the run that is still waiting for the previous commit.
+concurrency:
+  group: pr-${{ github.event.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  hand-off:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      statuses: write
+    outputs:
+      areas: ${{ steps.parse.outputs.areas }}
+    steps:
+      - name: Parse ticked areas from the PR body
+        id: parse
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          areas=$(printf '%s\n' "$PR_BODY" | tr -d '\r' \
+            | sed -nE 's/^[[:space:]]*[-*][[:space:]]*\[[xX]\][[:space:]]*([A-Za-z0-9_.]+)[[:space:]]*$/\1/p' \
+            | paste -sd, -)
+          echo "areas=$areas" >> "$GITHUB_OUTPUT"
+          echo "Ticked areas: ${areas:-<none, run everything>}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Post pending status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+          AREAS: ${{ steps.parse.outputs.areas }}
+        run: |
+          gh api -X POST "repos/$GITHUB_REPOSITORY/statuses/$SHA" \
+            -f state=pending \
+            -f context='CVCS local CI' \
+            -f description="queued for the local worker (areas: ${AREAS:-all})" \
+            -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+
+  report:
+    needs: hand-off
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Required reviewer on this Environment = the identity the worker's token belongs to.
+    # Approved  -> this job runs and ends green.
+    # Rejected  -> this job never runs and the run fails: the red check.
+    environment: local-ci
+    steps:
+      - name: Write the summary
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          {
+            echo "### Local CI passed"
+            echo
+            echo "Commit \`$SHA\` was built and tested by the local worker, which approved this job."
+            echo
+            gh api "repos/$GITHUB_REPOSITORY/commits/$SHA/statuses" \
+              --jq '[.[] | select(.context=="CVCS local CI")][0] | "Status: **\(.state)** · \(.description)"' || true
+          } >> "$GITHUB_STEP_SUMMARY"

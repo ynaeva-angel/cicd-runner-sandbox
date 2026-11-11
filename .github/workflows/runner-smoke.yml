@@ -1,0 +1,51 @@
+# Section 6 check: prove a newly registered self-hosted runner can build before it
+# is given the pool labels. Run it by hand from the Actions tab or with:
+#   gh workflow run runner-smoke.yml -f label=angel
+name: Runner smoke test
+
+on:
+  workflow_dispatch:
+    inputs:
+      label:
+        description: Extra runner label the job is pinned to
+        required: true
+        default: angel
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runner-smoke-${{ inputs.label }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    runs-on: [self-hosted, windows, x64, '${{ inputs.label }}']
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Runner facts
+        shell: powershell
+        run: |
+          "Runner : $env:RUNNER_NAME ($env:RUNNER_OS / $env:RUNNER_ARCH)"
+          "Machine: $env:COMPUTERNAME"
+          "Work   : $env:GITHUB_WORKSPACE"
+          dotnet --list-sdks
+
+      - name: Build and test (same script the worker calls)
+        shell: powershell
+        run: ./ci.ps1
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trx-${{ github.run_id }}
+          path: TestResults/*.trx
+          retention-days: 7
+
+      - name: Prune the work folder
+        if: always()
+        shell: powershell
+        run: git clean -xdf
