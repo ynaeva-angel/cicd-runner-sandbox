@@ -19,3 +19,12 @@ public class GreeterTests
         Assert.Equal("Hello, guest", Greeter.Greet(name));
     }
 }
+
+public class GreeterCasingTests
+{
+    [Fact]
+    public void Greet_keeps_the_original_casing()
+    {
+        Assert.Equal("Hello, ADA", Greeter.Greet("ADA"));
+    }
+}

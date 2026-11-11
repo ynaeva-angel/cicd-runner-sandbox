@@ -39,6 +39,11 @@ function Invoke-Step([string] $Name, [scriptblock] $Body) {
 Invoke-Step 'restore' { dotnet restore Sandbox.sln --nologo }
 Invoke-Step 'build'   { dotnet build Sandbox.sln -c $Configuration --no-restore @buildFlags }
 
+# SQL syntax check (ScriptDom, SQL Server 2022 grammar). Parses only; nothing is executed.
+Invoke-Step 'validate-sql' {
+    dotnet run --project tools/SqlSyntaxChecker -c $Configuration --no-build -- (Join-Path $PSScriptRoot 'Database')
+}
+
 # Discover test projects the same way the real pipeline does: *.xTest.csproj
 $projects = @(Get-ChildItem -Path (Join-Path $PSScriptRoot 'tests') -Recurse -Filter '*.xTest.csproj')
 if ($Areas.Count -gt 0) {

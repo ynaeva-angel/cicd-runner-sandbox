@@ -1,0 +1,42 @@
+# Mirrors the real NuGet Security Scan: GitHub-hosted, fails on High/Critical.
+# Unlike the real one it also runs on every push to the PR (synchronize), which is fix M3.
+name: NuGet Security Scan
+
+on:
+  pull_request:
+    branches: [main, 'sprint/**']
+    types: [opened, synchronize, reopened, ready_for_review]
+  schedule:
+    - cron: '0 1 1 * *'   # monthly
+  workflow_dispatch:
+
+concurrency:
+  group: nuget-scan-${{ github.event.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  nuget-scan:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Scan for vulnerable packages
+        shell: pwsh
+        run: ./nuget-scan.ps1
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuget-vulnerability-report
+          path: nuget-vulnerability-report.txt
+          retention-days: 7
+          if-no-files-found: ignore

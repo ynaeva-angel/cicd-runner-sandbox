@@ -95,3 +95,13 @@ outside contributor's workflow runs. Remove the runner when testing is done
 | `gh auth login` on the dev PC | fine-grained token in Windows Credential Manager under the service account |
 | `Sandbox.sln`, 2 test projects | 14 solutions, 5 `*.xTest` projects |
 | checkboxes `Core`, `Web` | the 13 area checkboxes |
+
+## SQL check and NuGet scan
+
+- **SQL syntax check**: `ci.ps1` runs `tools/SqlSyntaxChecker` over every `.sql` under `Database/`
+  (ScriptDom, SQL Server 2022 grammar; nothing is executed, no database needed). A syntax error
+  fails the build wherever `ci.ps1` runs: the local worker and the self-hosted runner.
+- **NuGet security scan**: `.github/workflows/nuget-security-scan.yml` runs `nuget-scan.ps1` on a
+  GitHub-hosted Windows runner for every PR push, monthly, and on demand. It fails on High or
+  Critical findings, direct or transitive. Run it locally with `./nuget-scan.ps1`.
+- `nuget.config` pins nuget.org, so a build machine with no user-level NuGet source still restores.
