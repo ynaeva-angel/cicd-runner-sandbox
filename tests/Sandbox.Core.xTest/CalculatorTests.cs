@@ -24,3 +24,12 @@ public class CalculatorTests
         Assert.Throws<DivideByZeroException>(() => Calculator.Divide(1, 0));
     }
 }
+
+public class CalculatorAddZeroTests
+{
+    [Fact]
+    public void Add_zero_is_identity()
+    {
+        Assert.Equal(7, Calculator.Add(7, 0));
+    }
+}
