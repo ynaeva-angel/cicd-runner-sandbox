@@ -34,6 +34,7 @@ jobs:
       # Container name, port and sa password are per run, so runs on one machine don't collide.
       # The runner has no pwsh, so the container steps use Windows PowerShell 5.1 (with Bypass, as
       # the machine blocks scripts) and Add-Content -Encoding utf8, because >> writes UTF-16 in 5.1.
+      # The runner has no sqlcmd either, so sqlcmd runs inside the container through docker exec.
       - name: Start SQL Server container
         shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
         run: |
@@ -48,8 +49,10 @@ jobs:
           $server = "127.0.0.1," + (docker port $name 1433 | Select-Object -First 1).Split(':')[-1]
           Add-Content -Path $env:GITHUB_ENV -Value "DB_SERVER=$server" -Encoding utf8
           Add-Content -Path $env:GITHUB_ENV -Value "DB_SA_PASSWORD=$password" -Encoding utf8
+          # In 5.1, stderr from a native command stops the script even with *> $null.
+          $ErrorActionPreference = 'Continue'
           for ($i = 0; $i -lt 60; $i++) {
-            sqlcmd -S $server -U sa -P $password -N -C -l 2 -Q "SELECT 1" *> $null
+            docker exec $name /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P $password -N -C -l 2 -Q "SELECT 1" *> $null
             if ($LASTEXITCODE -eq 0) { exit 0 }
             Start-Sleep -Seconds 2
           }
@@ -58,15 +61,22 @@ jobs:
       - name: Deploy and check
         shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
         run: |
-          sqlcmd -? | Select-Object -First 1
-          sqlcmd -S $env:DB_SERVER -U sa -P $env:DB_SA_PASSWORD -N -C -b -Q "CREATE DATABASE SandboxDb"
+          $ErrorActionPreference = 'Continue'
+          function Invoke-ContainerSqlcmd {
+            docker exec $env:DB_CONTAINER /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P $env:DB_SA_PASSWORD -N -C -b @args
+          }
+          # Copied rather than mounted: docker cp needs no file sharing between Windows and the engine.
+          docker cp Database "$($env:DB_CONTAINER):/sql"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $files = @(Get-ChildItem Database/Tables/*.sql | Sort-Object Name) +
-                   @(Get-ChildItem Database/Procedures/*.sql | Sort-Object Name) +
-                   @(Get-Item Database/CI/Check-MissingReferences.sql)
+          docker exec $env:DB_CONTAINER /opt/mssql-tools18/bin/sqlcmd -? | Select-Object -First 1
+          Invoke-ContainerSqlcmd -Q "CREATE DATABASE SandboxDb"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $files = @(foreach ($dir in 'Tables', 'Procedures') {
+                     Get-ChildItem "Database/$dir/*.sql" | Sort-Object Name | ForEach-Object { "/sql/$dir/$($_.Name)" }
+                   }) + '/sql/CI/Check-MissingReferences.sql'
           foreach ($f in $files) {
-            Write-Host "== $($f.Name)"
-            sqlcmd -S $env:DB_SERVER -U sa -P $env:DB_SA_PASSWORD -d SandboxDb -N -C -b -i $f.FullName
+            Write-Host "== $f"
+            Invoke-ContainerSqlcmd -d SandboxDb -i $f
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
 
