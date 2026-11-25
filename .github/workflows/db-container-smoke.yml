@@ -1,0 +1,72 @@
+# Proves the self-hosted runner can run a throwaway SQL Server 2022 container, deploy the
+# sandbox SQL into it with sqlcmd, run the missing-reference check and always remove it.
+#   gh workflow run db-container-smoke.yml --ref <branch> -f label=angel
+name: DB container smoke test
+
+on:
+  workflow_dispatch:
+    inputs:
+      label:
+        description: Extra runner label the job is pinned to
+        required: true
+        default: angel
+
+permissions:
+  contents: read
+
+concurrency:
+  group: db-container-smoke-${{ inputs.label }}
+
+jobs:
+  db:
+    runs-on: [self-hosted, windows, x64, '${{ inputs.label }}']
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          sparse-checkout: Database
+
+      # Container name, port and sa password are per run, so runs on one machine don't collide.
+      - name: Start SQL Server container
+        run: |
+          docker version
+          $name = "sandbox-db-${{ github.run_id }}-${{ github.run_attempt }}"
+          $password = 'Ci1!' + [guid]::NewGuid().ToString('N')
+          Write-Host "::add-mask::$password"
+          "DB_CONTAINER=$name" >> $env:GITHUB_ENV
+          docker run -d --name $name -e ACCEPT_EULA=Y -e "MSSQL_SA_PASSWORD=$password" `
+            -p 127.0.0.1::1433 mcr.microsoft.com/mssql/server:2022-CU27-GDR1-ubuntu-22.04
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $server = "127.0.0.1," + (docker port $name 1433 | Select-Object -First 1).Split(':')[-1]
+          "DB_SERVER=$server" >> $env:GITHUB_ENV
+          "DB_SA_PASSWORD=$password" >> $env:GITHUB_ENV
+          for ($i = 0; $i -lt 60; $i++) {
+            sqlcmd -S $server -U sa -P $password -N -C -l 2 -Q "SELECT 1" *> $null
+            if ($LASTEXITCODE -eq 0) { exit 0 }
+            Start-Sleep -Seconds 2
+          }
+          throw "SQL Server did not accept connections within 120 seconds."
+
+      - name: Deploy and check
+        run: |
+          sqlcmd -? | Select-Object -First 1
+          sqlcmd -S $env:DB_SERVER -U sa -P $env:DB_SA_PASSWORD -N -C -b -Q "CREATE DATABASE SandboxDb"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $files = @(Get-ChildItem Database/Tables/*.sql | Sort-Object Name) +
+                   @(Get-ChildItem Database/Procedures/*.sql | Sort-Object Name) +
+                   @(Get-Item Database/CI/Check-MissingReferences.sql)
+          foreach ($f in $files) {
+            Write-Host "== $($f.Name)"
+            sqlcmd -S $env:DB_SERVER -U sa -P $env:DB_SA_PASSWORD -d SandboxDb -N -C -b -i $f.FullName
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+      - name: Remove SQL Server container
+        if: always() && env.DB_CONTAINER != ''
+        run: docker rm -f $env:DB_CONTAINER
+
+      - name: Prune the work folder
+        if: always()
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
+        run: git clean -xdfq
