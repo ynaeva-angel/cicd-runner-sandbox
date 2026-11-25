@@ -32,19 +32,22 @@ jobs:
           sparse-checkout: Database
 
       # Container name, port and sa password are per run, so runs on one machine don't collide.
+      # The runner has no pwsh, so the container steps use Windows PowerShell 5.1 (with Bypass, as
+      # the machine blocks scripts) and Add-Content -Encoding utf8, because >> writes UTF-16 in 5.1.
       - name: Start SQL Server container
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
         run: |
           docker version
           $name = "sandbox-db-${{ github.run_id }}-${{ github.run_attempt }}"
           $password = 'Ci1!' + [guid]::NewGuid().ToString('N')
           Write-Host "::add-mask::$password"
-          "DB_CONTAINER=$name" >> $env:GITHUB_ENV
+          Add-Content -Path $env:GITHUB_ENV -Value "DB_CONTAINER=$name" -Encoding utf8
           docker run -d --name $name -e ACCEPT_EULA=Y -e "MSSQL_SA_PASSWORD=$password" `
             -p 127.0.0.1::1433 mcr.microsoft.com/mssql/server:2022-CU27-GDR1-ubuntu-22.04
           if ($LASTEXITCODE -ne 0) { exit 1 }
           $server = "127.0.0.1," + (docker port $name 1433 | Select-Object -First 1).Split(':')[-1]
-          "DB_SERVER=$server" >> $env:GITHUB_ENV
-          "DB_SA_PASSWORD=$password" >> $env:GITHUB_ENV
+          Add-Content -Path $env:GITHUB_ENV -Value "DB_SERVER=$server" -Encoding utf8
+          Add-Content -Path $env:GITHUB_ENV -Value "DB_SA_PASSWORD=$password" -Encoding utf8
           for ($i = 0; $i -lt 60; $i++) {
             sqlcmd -S $server -U sa -P $password -N -C -l 2 -Q "SELECT 1" *> $null
             if ($LASTEXITCODE -eq 0) { exit 0 }
@@ -53,6 +56,7 @@ jobs:
           throw "SQL Server did not accept connections within 120 seconds."
 
       - name: Deploy and check
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
         run: |
           sqlcmd -? | Select-Object -First 1
           sqlcmd -S $env:DB_SERVER -U sa -P $env:DB_SA_PASSWORD -N -C -b -Q "CREATE DATABASE SandboxDb"
@@ -68,6 +72,7 @@ jobs:
 
       - name: Remove SQL Server container
         if: always() && env.DB_CONTAINER != ''
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
         run: docker rm -f $env:DB_CONTAINER
 
       - name: Prune the work folder
